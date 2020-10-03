@@ -1,0 +1,14 @@
+<launch>
+    <include file="$(find brick_search)/launch/ar_group_project_2.launch" />
+
+    <include file="$(find turtlebot3_navigation)/launch/turtlebot3_navigation.launch">
+	<arg name = "map_file" value = "$(env HOME)/ar_group_project_2_map.yaml" />
+    </include>
+
+
+    <node pkg="brick_search" type="brick_search" respawn="false" name="brick_search" output="screen"/>
+
+
+
+
+</launch>

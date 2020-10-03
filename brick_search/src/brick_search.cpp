@@ -87,6 +87,8 @@ private:
   geometry_msgs::Pose2D getPose2d();
   void amclPoseCallback(const geometry_msgs::PoseWithCovarianceStamped& pose_msg);
   void imageCallback(const sensor_msgs::ImageConstPtr& image_msg_ptr);
+
+  image_transport::Publisher image_pub_;
 };
 
 // Constructor
@@ -139,6 +141,8 @@ BrickSearch::BrickSearch(ros::NodeHandle& nh) : it_{ nh }
   ros::ServiceClient global_localization_service_client = nh.serviceClient<std_srvs::Empty>("global_localization");
   std_srvs::Empty srv{};
   global_localization_service_client.call(srv);
+
+  image_pub_ = it_.advertise("/blob_detection", 1);
 }
 
 geometry_msgs::Pose2D BrickSearch::getPose2d()
@@ -184,6 +188,7 @@ void BrickSearch::amclPoseCallback(const geometry_msgs::PoseWithCovarianceStampe
 void BrickSearch::imageCallback(const sensor_msgs::ImageConstPtr& image_msg_ptr)
 {
   // Use this method to identify when the brick is visible
+  brick_found_ = 0;
 
   // The camera publishes at 30 fps, it's probably a good idea to analyse images at a lower rate than that
   if (image_msg_count_ < 15)
@@ -207,6 +212,65 @@ void BrickSearch::imageCallback(const sensor_msgs::ImageConstPtr& image_msg_ptr)
   // Since the "imageCallback" and "mainLoop" methods can run at the same time you should protect any shared variables
   // with a mutex
   // "brick_found_" doesn't need a mutex because it's an atomic
+  
+  // Convert the camera image into a HSV image
+  cv::Mat hsv_image;
+  cv::cvtColor(image, hsv_image, CV_RGB2HSV);
+
+  // Set boundary limits for detecting red objects (STILL NEED TO BE REFINED)
+  cv::Scalar min(0, 200, 100);
+  cv::Scalar max(20/2, 255, 255);
+
+  // Generate boundary image set detected red components to white and the rest black
+  cv::Mat threshold_mat;
+  cv::inRange(hsv_image, min, max, threshold_mat);
+  
+  
+  // Initialise variables ready for blob/object detection
+  std::vector<std::vector<cv::Point>> contours;
+  std::vector<cv::Vec4i> hierarchy;
+  std::vector<cv::Point2i> centre;
+  std::vector<int> radius;
+
+  // Perform blob detection
+  cv::findContours(threshold_mat.clone(), contours, hierarchy, CV_RETR_TREE, CV_CHAIN_APPROX_NONE);
+
+  // Iterate through each of the contours/blobs detected and create a Circle surrounding the blob
+  int count = contours.size();
+  for(int i=0; i < count; i++){
+    cv::Point2f c;
+    float r;
+    cv::minEnclosingCircle(contours[i], c, r);
+
+    // Only save larger blobs (red brick). If a larger blob is seen, it is the brick and set the brick found variable to 1
+    if(r > 50) {
+        std::cout << "Circle at: " << c.x << ", " << c.y << " with radius: " << r << std::endl;
+        std::cout << std::endl;
+
+        centre.push_back(c);
+        radius.push_back(r);
+        brick_found_ = 1;
+    }
+  }
+
+  // Print red Circle onto the image for visualisation purposes
+  count = centre.size();
+  cv::Scalar red(255,0,0);  
+  for(int i = 0; i < count; i++){
+    cv::circle(threshold_mat, centre[i], radius[i], red, 3);
+  }
+
+
+  // Create CV Image for displaying output of blob detection
+  cv_bridge::CvImage threshold_image;
+  threshold_image.encoding = "mono8";
+  threshold_image.header = std_msgs::Header();
+  threshold_image.image = threshold_mat;
+
+  // Publish image to topic
+  image_pub_.publish(threshold_image.toImageMsg());
+
+  
 
   ROS_INFO("imageCallback");
   ROS_INFO_STREAM("brick_found_: " << brick_found_);
@@ -220,7 +284,7 @@ void BrickSearch::mainLoop()
   {
     // Turn slowly
     geometry_msgs::Twist twist{};
-    twist.angular.z = 1.;
+    twist.angular.z = 0.5;
     cmd_vel_pub_.publish(twist);
 
     if (localised_)
@@ -241,11 +305,12 @@ void BrickSearch::mainLoop()
   // You will probably need the data stored in "map_.info"
   // You can also access the map data as an OpenCV image with "map_image_"
 
+
   // Here's an example of getting the current pose and sending a goal to "move_base":
   geometry_msgs::Pose2D pose_2d = getPose2d();
 
   ROS_INFO_STREAM("Current pose: " << pose_2d);
-
+/*
   // Move forward 0.5 m
   pose_2d.x += 0.5 * std::cos(pose_2d.theta);
   pose_2d.y += 0.5 * std::sin(pose_2d.theta);
@@ -260,6 +325,7 @@ void BrickSearch::mainLoop()
 
   ROS_INFO("Sending goal...");
   move_base_action_client_.sendGoal(action_goal.goal);
+*/
 
   // This loop repeats until ROS shuts down, you probably want to put all your code in here
   while (ros::ok())
@@ -275,7 +341,7 @@ void BrickSearch::mainLoop()
       ROS_INFO_STREAM(state.getText());
 
       // Shutdown when done
-      ros::shutdown();
+      //ros::shutdown();
     }
 
     // Delay so the loop doesn't run too fast
