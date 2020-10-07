@@ -31,3 +31,8 @@ target_include_directories(brick_search PRIVATE include)
 
 target_link_libraries(brick_search ${OpenCV_LIBS} ${catkin_LIBRARIES})
 
+add_executable(frontier_explorer src/frontier_explorer.cpp)
+
+target_include_directories(frontier_explorer SYSTEM PRIVATE ${OpenCV_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS})
+target_link_libraries(frontier_explorer ${OpenCV_LIBS} ${catkin_LIBRARIES})
+
