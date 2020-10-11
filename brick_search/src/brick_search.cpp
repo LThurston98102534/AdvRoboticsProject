@@ -219,7 +219,7 @@ void BrickSearch::imageCallback(const sensor_msgs::ImageConstPtr& image_msg_ptr)
 
   // Set boundary limits for detecting red objects (STILL NEED TO BE REFINED)
   cv::Scalar min(0, 200, 100);
-  cv::Scalar max(20/2, 255, 255);
+  cv::Scalar max(15/2, 255, 255);
 
   // Generate boundary image set detected red components to white and the rest black
   cv::Mat threshold_mat;
@@ -243,7 +243,7 @@ void BrickSearch::imageCallback(const sensor_msgs::ImageConstPtr& image_msg_ptr)
     cv::minEnclosingCircle(contours[i], c, r);
 
     // Only save larger blobs (red brick). If a larger blob is seen, it is the brick and set the brick found variable to 1
-    if(r > 50) {
+    if(r > 75) {
         std::cout << "Circle at: " << c.x << ", " << c.y << " with radius: " << r << std::endl;
         std::cout << std::endl;
 
@@ -269,8 +269,6 @@ void BrickSearch::imageCallback(const sensor_msgs::ImageConstPtr& image_msg_ptr)
 
   // Publish image to topic
   image_pub_.publish(threshold_image.toImageMsg());
-
-  
 
   ROS_INFO("imageCallback");
   ROS_INFO_STREAM("brick_found_: " << brick_found_);
@@ -305,6 +303,8 @@ void BrickSearch::mainLoop()
   // You will probably need the data stored in "map_.info"
   // You can also access the map data as an OpenCV image with "map_image_"
 
+  ROS_INFO_STREAM("map_ resolution: " << map_.info.resolution);
+
 
   // Here's an example of getting the current pose and sending a goal to "move_base":
   geometry_msgs::Pose2D pose_2d = getPose2d();
@@ -331,15 +331,35 @@ void BrickSearch::mainLoop()
   while (ros::ok())
   {
     ROS_INFO("mainLoop");
+    if(brick_found_ < 1){
+	// Autonomously drive around the maze
+        // Check current position of robot
+        // Calculate next position to drive to
+        // Set action goal
+ 	// Send goal to move_base
+
+
+    } else {
+	// Calculate relative position of brick from TurtleBot
+        // Calculate next drive instruction to drive towards the brick
+        // Set action goal
+ 	// Send goal to move_base
+        // Set flag upon reaching the brick
+
+    }
 
     // Get the state of the goal
     actionlib::SimpleClientGoalState state = move_base_action_client_.getState();
 
     if (state == actionlib::SimpleClientGoalState::SUCCEEDED)
     {
+      // Stop TurtleBot and await next instruction
+
+
       // Print the state of the goal
       ROS_INFO_STREAM(state.getText());
 
+      // Check if flag is set of reaching the brick, if so, shutdown ROS
       // Shutdown when done
       //ros::shutdown();
     }
