@@ -14,6 +14,10 @@
 #include <cv_bridge/cv_bridge.h>
 #include <actionlib/client/simple_action_client.h>
 #include <move_base_msgs/MoveBaseAction.h>
+#include <mutex>
+
+const int stopping_dist_from_brick = 400;
+const int brick_angular_thresh = 150;
 
 namespace
 {
@@ -89,6 +93,19 @@ private:
   void imageCallback(const sensor_msgs::ImageConstPtr& image_msg_ptr);
 
   image_transport::Publisher image_pub_;
+
+
+  cv::Point2f brick_centre_;
+  float brick_circle_radius_;
+  std::mutex brick_properties_mutex_;
+
+  int img_width_;
+  int img_height_;
+  int img_props_set_;
+  std::mutex img_properties_mutex_;
+
+  std::atomic<bool> navigated_to_brick_{ false};
+
 };
 
 // Constructor
@@ -143,6 +160,12 @@ BrickSearch::BrickSearch(ros::NodeHandle& nh) : it_{ nh }
   global_localization_service_client.call(srv);
 
   image_pub_ = it_.advertise("/blob_detection", 1);
+  //image_pub_ = it_.advertise("/map_image", 1);
+
+  img_props_set_ = 0;
+  img_width_ = 0;
+  img_height_ = 0;
+
 }
 
 geometry_msgs::Pose2D BrickSearch::getPose2d()
@@ -187,9 +210,6 @@ void BrickSearch::amclPoseCallback(const geometry_msgs::PoseWithCovarianceStampe
 
 void BrickSearch::imageCallback(const sensor_msgs::ImageConstPtr& image_msg_ptr)
 {
-  // Use this method to identify when the brick is visible
-  brick_found_ = 0;
-
   // The camera publishes at 30 fps, it's probably a good idea to analyse images at a lower rate than that
   if (image_msg_count_ < 15)
   {
@@ -198,6 +218,8 @@ void BrickSearch::imageCallback(const sensor_msgs::ImageConstPtr& image_msg_ptr)
   }
   else
   {
+    // Use this method to identify when the brick is visible
+    brick_found_ = false;
     image_msg_count_ = 0;
   }
 
@@ -216,6 +238,16 @@ void BrickSearch::imageCallback(const sensor_msgs::ImageConstPtr& image_msg_ptr)
   // Convert the camera image into a HSV image
   cv::Mat hsv_image;
   cv::cvtColor(image, hsv_image, CV_RGB2HSV);
+
+  if (img_props_set_ < 1){
+    std::unique_lock<std::mutex> img_properties_lock(img_properties_mutex_);
+    img_width_ = hsv_image.cols;
+    img_height_ = hsv_image.rows;
+    
+    img_properties_lock.unlock();
+
+    img_props_set_++;
+  }
 
   // Set boundary limits for detecting red objects (STILL NEED TO BE REFINED)
   cv::Scalar min(0, 200, 100);
@@ -240,6 +272,7 @@ void BrickSearch::imageCallback(const sensor_msgs::ImageConstPtr& image_msg_ptr)
   for(int i=0; i < count; i++){
     cv::Point2f c;
     float r;
+    float max_radius = 0.0;
     cv::minEnclosingCircle(contours[i], c, r);
 
     // Only save larger blobs (red brick). If a larger blob is seen, it is the brick and set the brick found variable to 1
@@ -249,7 +282,16 @@ void BrickSearch::imageCallback(const sensor_msgs::ImageConstPtr& image_msg_ptr)
 
         centre.push_back(c);
         radius.push_back(r);
-        brick_found_ = 1;
+
+        if(max_radius < r){
+	    max_radius = r;
+	    std::unique_lock<std::mutex> brick_properties_lock(brick_properties_mutex_);
+            brick_circle_radius_ = r;
+	    brick_centre_ = c;
+
+            brick_properties_lock.unlock();
+	}
+        brick_found_ = true;
     }
   }
 
@@ -291,6 +333,20 @@ void BrickSearch::mainLoop()
       break;
     }
 
+
+    // Create CV Image for displaying output of blob detection
+    /*
+    cv_bridge::CvImage threshold_image;
+    threshold_image.encoding = "mono8";
+    threshold_image.header = std_msgs::Header();
+    threshold_image.image = map_image_;
+    image_pub_.publish(threshold_image.toImageMsg());
+
+    std::cout << "Map Width: " << map_.info.width;
+    std::cout << "Map Height: " << map_.info.height;
+    std::cout << "Map Resolution: " << map_.info.resolution;
+    std::cout << "Map Origin: " << map_.info.origin.position.x << ", " << map_.info.origin.position.y;
+*/
     ros::Duration(0.1).sleep();
   }
 
@@ -331,7 +387,9 @@ void BrickSearch::mainLoop()
   while (ros::ok())
   {
     ROS_INFO("mainLoop");
-    if(brick_found_ < 1){
+    if(!brick_found_){
+
+	std::cout << "Brick not found" << std::endl;
 	// Autonomously drive around the maze
         // Check current position of robot
         // Calculate next position to drive to
@@ -340,11 +398,48 @@ void BrickSearch::mainLoop()
 
 
     } else {
+        std::cout << "Brick Found! Navigating to brick" << std::endl;
+        double brick_radius;
+        double diff_x;
+	int img_width_for_calc;
+
 	// Calculate relative position of brick from TurtleBot
-        // Calculate next drive instruction to drive towards the brick
-        // Set action goal
- 	// Send goal to move_base
-        // Set flag upon reaching the brick
+	std::unique_lock<std::mutex> brick_properties_lock(brick_properties_mutex_);
+        brick_radius = brick_circle_radius_;
+	diff_x = brick_centre_.x - (img_width_/2);
+        img_width_for_calc = img_width_;
+
+        brick_properties_lock.unlock();
+	geometry_msgs::Twist twist{};
+	
+	std::cout << "Brick Radius: " << brick_radius << std::endl;
+
+	if(brick_radius < stopping_dist_from_brick){
+	    
+	    if(std::abs(diff_x) > brick_angular_thresh){
+		std::cout << "Twisting to face brick" << std::endl;
+		twist.linear.x = 0.;
+  	        twist.angular.z = -1*(diff_x/img_width_for_calc)*0.3;
+
+	    } else {
+		std::cout << "Driving at brick!" << std::endl;
+		twist.angular.z = 0.;
+		twist.linear.x = ((stopping_dist_from_brick - brick_radius)/stopping_dist_from_brick)*0.2;
+
+	    }
+
+        } else {
+  	    twist.angular.z = 0.;
+	    twist.linear.x = 0.;
+
+	    navigated_to_brick_ = true;
+
+        }
+
+	std::cout << "Twist Linear: " << twist.linear.x << ", " << twist.linear.y << ", " << twist.linear.z << std::endl;
+        std::cout << "Twist Angular: " << twist.angular.x << ", " << twist.angular.y << ", " << twist.angular.z << std::endl;
+
+        cmd_vel_pub_.publish(twist);
 
     }
 
@@ -353,8 +448,6 @@ void BrickSearch::mainLoop()
 
     if (state == actionlib::SimpleClientGoalState::SUCCEEDED)
     {
-      // Stop TurtleBot and await next instruction
-
 
       // Print the state of the goal
       ROS_INFO_STREAM(state.getText());
