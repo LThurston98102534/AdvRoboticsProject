@@ -293,7 +293,7 @@ void BrickSearch::imageCallback(const sensor_msgs::ImageConstPtr& image_msg_ptr)
     cv::minEnclosingCircle(contours[i], c, r);
 
     // Only save larger blobs (red brick). If a larger blob is seen, it is the brick and set the brick found variable to 1
-    if(r > 75) {
+    if(r > 220) {
         std::cout << "Circle at: " << c.x << ", " << c.y << " with radius: " << r << std::endl;
         std::cout << std::endl;
 
@@ -339,7 +339,7 @@ void BrickSearch::AssessMap() {
   std::cout << "Assessing the map!" << std::endl;
   int MapWidth = map_image_.cols;
   int MapHeight = map_image_.rows;
-  const int RegionSize = 10;
+  const int RegionSize = 20;
   const int PIXEL_BLACK = 0;
   bool validGoal;
   
@@ -356,6 +356,7 @@ void BrickSearch::AssessMap() {
         //Add it to the stack of goal poses
         validGoal = true;
 
+        // Check that within 6 pixels left, right, up and down, it is all free space to provide enough room for the robot to drive to and turn around the goal pose
         for(int k = -6; k < 7; k ++){
           for(int l = -6; l < 7; l ++){
             if((map_image_.at<unsigned char>(px+k, py+l) > PIXEL_BLACK)) {
@@ -390,6 +391,7 @@ void BrickSearch::orderGoalPoses(geometry_msgs::Pose2D &robot_pose){
   
   geometry_msgs::Pose temp_pose;
   
+  // Sort in descending order based on distance from the robot
   for ( int i = 0; i < (int)ValidGoalList.size(); ++ i ) {
     for ( int j = 0; j < (int)ValidGoalList.size()-1; ++ j ) {
       distance_1 = std::pow(std::pow((ValidGoalList.at(j).position.x - robot_pose.x),2)+std::pow((ValidGoalList.at(j).position.y - robot_pose.y),2),0.5);
@@ -477,6 +479,13 @@ void BrickSearch::mainLoop()
 
   // This loop repeats until ROS shuts down, you probably want to put all your code in here
   int goal_pose_counter = 0;
+  int same_goal_counter = 0;
+  int goal_offset = 0;
+  bool goal_timed_out = false;
+
+  geometry_msgs::Pose2D prev_goal_position;
+  prev_goal_position.x = 0.0;
+  prev_goal_position.y = 0.0;
   
   while (ros::ok())
   {
@@ -484,8 +493,31 @@ void BrickSearch::mainLoop()
     if(!brick_found_){
       geometry_msgs::Pose2D move_goal_position;
 
-      move_goal_position.x = ValidGoalList.back().position.x;
-      move_goal_position.y = ValidGoalList.back().position.y;
+      // Set target position and store in move_goal_position
+      move_goal_position.x = ValidGoalList.at(ValidGoalList.size() - 1 - goal_offset).position.x;
+      move_goal_position.y = ValidGoalList.at(ValidGoalList.size() - 1 - goal_offset).position.y;
+
+      // Count how many times the same target position is being chased
+      if((move_goal_position.x == prev_goal_position.x) && (move_goal_position.y == prev_goal_position.y)){
+          same_goal_counter++;
+      } else {
+          same_goal_counter = 0;
+          goal_offset = 0;
+      }
+
+      // If it exceeds a threshold, the robot is stuck and change the target position to be the next closest to the robot
+      if(same_goal_counter >= 30){
+          goal_offset++;
+
+          move_goal_position.x = ValidGoalList.at(ValidGoalList.size() - 1 - goal_offset).position.x;
+          move_goal_position.y = ValidGoalList.at(ValidGoalList.size() - 1 - goal_offset).position.y;
+
+          same_goal_counter = 0;
+          goal_timed_out = true;
+      }
+
+
+      std::cout << "Same Goal Counter: " << same_goal_counter << std::endl;
 
       std::cout << "Set Goal Position to be: (" << move_goal_position.x << ", " << move_goal_position.y << ")" << std::endl;
                 
@@ -496,9 +528,11 @@ void BrickSearch::mainLoop()
 
       ROS_INFO_STREAM("Send goal... X:" << move_goal_position.x << ", Y:" << move_goal_position.y );
 
+      prev_goal_position = move_goal_position;
+
       move_base_action_client_.sendGoal(action_goal.goal);
 
-      ros::Duration(2.0).sleep();
+      ros::Duration(1.0).sleep();
       
      
     } else {
@@ -518,14 +552,17 @@ void BrickSearch::mainLoop()
 	geometry_msgs::Twist twist{};
 	
 	std::cout << "Brick Radius: " << brick_radius << std::endl;
-
+        
+        // If not close enough to the brick, adjust to drive towards it
 	if(brick_radius < stopping_dist_from_brick){
 	    
+            // Centre brick in the FOV of the camera
 	    if(std::abs(diff_x) > brick_angular_thresh){
 		std::cout << "Twisting to face brick" << std::endl;
 		twist.linear.x = 0.;
   	        twist.angular.z = -1*(diff_x/img_width_for_calc)*0.3;
 
+            // Once centred, drive towards the brick
 	    } else {
 		std::cout << "Driving at brick!" << std::endl;
 		twist.angular.z = 0.;
@@ -534,6 +571,7 @@ void BrickSearch::mainLoop()
 	    }
 
         } else {
+            // Once reaching the brick, stop moving and set flag to true
   	    twist.angular.z = 0.;
 	    twist.linear.x = 0.;
 
@@ -554,28 +592,40 @@ void BrickSearch::mainLoop()
 
     if ((state == actionlib::SimpleClientGoalState::SUCCEEDED) || (navigated_to_brick_ == true))
     {
-
+      // Check if flag is set of reaching the brick, if so, shutdown ROS
       if(navigated_to_brick_ == true){
+        std::cout << "Found the Brick and reached the Target Location. Shutting Down ROS" << std::endl;
         ros::shutdown();
       } else {
         // Print the state of the goal
         ROS_INFO_STREAM(state.getText());
 
-        // Check if flag is set of reaching the brick, if so, shutdown ROS
+        // Check if the goal had timed out
+        if(goal_timed_out){
+          // If so, delete the waypoint that was reached by shifting all entries along and removing the last entry of the vector
+          for(int i = 0; i < goal_offset; i++){
+	    ValidGoalList.at(ValidGoalList.size() - 1 - goal_offset + i) = ValidGoalList.at(ValidGoalList.size() - 1 - goal_offset + (i+1));
+          }
+          goal_timed_out = false;
+        }
         ValidGoalList.pop_back();
         
         goal_pose_counter++;
 
+        // Every three goal positions, re-order the waypoints based on their distance from the robot
         if(goal_pose_counter >= 3){
             geometry_msgs::Pose2D robot_pose = getPose2d();
             orderGoalPoses(robot_pose);
 
+            goal_pose_counter = 0;
+
         }
         
-      
-        // Shutdown when done
+        // If all waypoints have been hit, reset waypoints and start again
         if ((ValidGoalList.size() == 0)) {
-          ros::shutdown();
+          AssessMap();
+          geometry_msgs::Pose2D robot_pose = getPose2d();
+          orderGoalPoses(robot_pose);
         }
       }
       
