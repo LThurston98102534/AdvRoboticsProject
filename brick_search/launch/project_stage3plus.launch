@@ -1,10 +1,21 @@
 <launch>
-    <!-- <include file="$(find brick_search)/launch/ar_group_project_2.launch" /> -->
+<!--    <include file="$(find brick_search)/launch/ar_group_project_2.launch" />
+  
+    <include file="$(find turtlebot3_navigation)/launch/turtlebot3_navigation.launch">
+	<arg name = "map_file" value = "$(env HOME)/ar_group_project_2_map.yaml" />
+    </include>
+-->
 
-    <include file="$(find turtlebot3_gazebo)/launch/turtlebot3_stage_4.launch" />
+
+
+    <include file="$(find turtlebot3_gazebo)/launch/turtlebot3_stage_4.launch">
+      <arg name="x_pos" value="0.7"/>
+      <arg name="y_pos" value="-1.7"/>
+      <arg name="z_pos" default="0.0"/>
+    </include>
 
     <include file="$(find turtlebot3_navigation)/launch/turtlebot3_navigation.launch">
-	<arg name = "map_file" value = "$(env HOME)/Documents/AdvancedRobotics/GroupAssignment/brick_search/maps/OGMap.yaml" />
+	<arg name = "map_file" value = "$(find brick_search)/maps/OGMap.yaml" />
     </include>
 
     <node pkg="brick_search" type="map_explorer" respawn="false" name="map_explorer" output="screen"/>

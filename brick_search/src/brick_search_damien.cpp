@@ -229,7 +229,7 @@ void BrickSearch::imageCallback(const sensor_msgs::ImageConstPtr& image_msg_ptr)
 {
   bool brick_flag = false;
   // The camera publishes at 30 fps, it's probably a good idea to analyse images at a lower rate than that
-  if (image_msg_count_ < 15)
+  if (image_msg_count_ < 10)
   {
     image_msg_count_++;
     return;
@@ -293,7 +293,7 @@ void BrickSearch::imageCallback(const sensor_msgs::ImageConstPtr& image_msg_ptr)
     cv::minEnclosingCircle(contours[i], c, r);
 
     // Only save larger blobs (red brick). If a larger blob is seen, it is the brick and set the brick found variable to 1
-    if(r > 220) {
+    if(r > 120) {
         std::cout << "Circle at: " << c.x << ", " << c.y << " with radius: " << r << std::endl;
         std::cout << std::endl;
 
@@ -339,7 +339,7 @@ void BrickSearch::AssessMap() {
   std::cout << "Assessing the map!" << std::endl;
   int MapWidth = map_image_.cols;
   int MapHeight = map_image_.rows;
-  const int RegionSize = 20;
+  const int RegionSize = 10;
   const int PIXEL_BLACK = 0;
   bool validGoal;
   
@@ -357,12 +357,12 @@ void BrickSearch::AssessMap() {
         validGoal = true;
 
         // Check that within 6 pixels left, right, up and down, it is all free space to provide enough room for the robot to drive to and turn around the goal pose
-        for(int k = -6; k < 7; k ++){
-          for(int l = -6; l < 7; l ++){
+        for(int k = -5; k < 6; k ++){
+          for(int l = -5; l < 6; l ++){
             if((map_image_.at<unsigned char>(px+k, py+l) > PIXEL_BLACK)) {
                validGoal = false;
-               k = 7;
-               l = 7;
+               k = 6;
+               l = 6;
             }
           }
         }
@@ -494,8 +494,10 @@ void BrickSearch::mainLoop()
       geometry_msgs::Pose2D move_goal_position;
 
       // Set target position and store in move_goal_position
-      move_goal_position.x = ValidGoalList.at(ValidGoalList.size() - 1 - goal_offset).position.x;
-      move_goal_position.y = ValidGoalList.at(ValidGoalList.size() - 1 - goal_offset).position.y;
+      //move_goal_position.x = ValidGoalList.at(ValidGoalList.size() - 1 - goal_offset).position.x;
+      //move_goal_position.y = ValidGoalList.at(ValidGoalList.size() - 1 - goal_offset).position.y;
+      move_goal_position.x = ValidGoalList.at(goal_offset).position.x;
+      move_goal_position.y = ValidGoalList.at(goal_offset).position.y;
 
       // Count how many times the same target position is being chased
       if((move_goal_position.x == prev_goal_position.x) && (move_goal_position.y == prev_goal_position.y)){
@@ -509,8 +511,10 @@ void BrickSearch::mainLoop()
       if(same_goal_counter >= 30){
           goal_offset++;
 
-          move_goal_position.x = ValidGoalList.at(ValidGoalList.size() - 1 - goal_offset).position.x;
-          move_goal_position.y = ValidGoalList.at(ValidGoalList.size() - 1 - goal_offset).position.y;
+          //move_goal_position.x = ValidGoalList.at(ValidGoalList.size() - 1 - goal_offset).position.x;
+          //move_goal_position.y = ValidGoalList.at(ValidGoalList.size() - 1 - goal_offset).position.y;
+          move_goal_position.x = ValidGoalList.at(goal_offset).position.x;
+          move_goal_position.y = ValidGoalList.at(goal_offset).position.y;
 
           same_goal_counter = 0;
           goal_timed_out = true;
@@ -601,26 +605,22 @@ void BrickSearch::mainLoop()
         ROS_INFO_STREAM(state.getText());
 
         // Check if the goal had timed out
-        if(goal_timed_out){
-          // If so, delete the waypoint that was reached by shifting all entries along and removing the last entry of the vector
-          for(int i = 0; i < goal_offset; i++){
-	    ValidGoalList.at(ValidGoalList.size() - 1 - goal_offset + i) = ValidGoalList.at(ValidGoalList.size() - 1 - goal_offset + (i+1));
-          }
+        if(goal_timed_out){  
           goal_timed_out = false;
+          goal_offset = 0;
         }
+
+        for(int i = goal_offset; i < (ValidGoalList.size() - 1); i++){
+	  ValidGoalList.at(i) = ValidGoalList.at(i+1);
+
+        }
+
         ValidGoalList.pop_back();
+
+        geometry_msgs::Pose2D robot_pose = getPose2d();
+        orderGoalPoses(robot_pose);
         
-        goal_pose_counter++;
 
-        // Every three goal positions, re-order the waypoints based on their distance from the robot
-        if(goal_pose_counter >= 3){
-            geometry_msgs::Pose2D robot_pose = getPose2d();
-            orderGoalPoses(robot_pose);
-
-            goal_pose_counter = 0;
-
-        }
-        
         // If all waypoints have been hit, reset waypoints and start again
         if ((ValidGoalList.size() == 0)) {
           AssessMap();
