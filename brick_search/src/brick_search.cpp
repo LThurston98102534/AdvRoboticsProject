@@ -113,6 +113,8 @@ private:
 
   std::atomic<bool> navigated_to_brick_{ false};
 
+  ros::ServiceClient clear_costmaps_client_;
+
 };
 
 // Constructor
@@ -135,6 +137,8 @@ BrickSearch::BrickSearch(ros::NodeHandle& nh) : it_{ nh }
     map_ = get_map.response.map;
     ROS_INFO("Map received");
   }
+
+  clear_costmaps_client_ = nh.serviceClient<std_srvs::Empty>("/move_base/clear_costmaps");
 
   // Calculate the map centre
   map_centre_.x = ((-1*map_.info.origin.position.x)/map_.info.resolution);
@@ -357,12 +361,12 @@ void BrickSearch::AssessMap() {
         validGoal = true;
 
         // Check that within 5 pixels left, right, up and down, it is all free space to provide enough room for the robot to drive to and turn around the goal pose
-        for(int k = -4; k < 5; k ++){
-          for(int l = -4; l < 5; l ++){
+        for(int k = -5; k < 6; k ++){
+          for(int l = -5; l < 6; l ++){
             if((map_image_.at<unsigned char>(px+k, py+l) > PIXEL_BLACK)) {
                validGoal = false;
-               k = 5;
-               l = 5;
+               k = 6;
+               l = 6;
             }
           }
         }
@@ -427,6 +431,13 @@ void BrickSearch::mainLoop()
 
     ros::Duration(0.1).sleep();
   }
+
+
+  std_srvs::Empty srv;
+  clear_costmaps_client_.call(srv);
+
+  ros::Duration(5.0).sleep();
+
 
   // Create CV Image for displaying output of map 
   cv_bridge::CvImage map_image;
