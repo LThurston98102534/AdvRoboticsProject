@@ -16,7 +16,7 @@
 #include <move_base_msgs/MoveBaseAction.h>
 #include <mutex>
 
-const int stopping_dist_from_brick = 400;
+const int stopping_dist_from_brick = 420;
 const int brick_angular_thresh = 150;
 
 namespace
@@ -69,7 +69,10 @@ private:
   std::atomic<bool> localised_{ false };
   std::atomic<bool> brick_found_{ false };
   int image_msg_count_ = 0;
-
+  cv::Point map_centre_;
+  std::vector<geometry_msgs::Pose> ValidGoalList;
+  
+  
   // Transform listener
   tf2_ros::Buffer transform_buffer_{};
   tf2_ros::TransformListener transform_listener_{ transform_buffer_ };
@@ -91,8 +94,12 @@ private:
   geometry_msgs::Pose2D getPose2d();
   void amclPoseCallback(const geometry_msgs::PoseWithCovarianceStamped& pose_msg);
   void imageCallback(const sensor_msgs::ImageConstPtr& image_msg_ptr);
+  void AssessMap();
 
+  void orderGoalPoses(geometry_msgs::Pose2D &robot_pose);
+  
   image_transport::Publisher image_pub_;
+  image_transport::Publisher image_map_pub_;
 
 
   cv::Point2f brick_centre_;
@@ -129,8 +136,16 @@ BrickSearch::BrickSearch(ros::NodeHandle& nh) : it_{ nh }
     ROS_INFO("Map received");
   }
 
+  // Calculate the map centre
+  map_centre_.x = ((-1*map_.info.origin.position.x)/map_.info.resolution);
+  map_centre_.y = ((-1*map_.info.origin.position.y)/map_.info.resolution);
+
+  std::cout << "Map Centre: " << map_centre_.x << ", " << map_centre_.y << std::endl;
+  
   // This allows you to access the map data as an OpenCV image
   map_image_ = cv::Mat(map_.info.height, map_.info.width, CV_8U, &map_.data.front());
+
+  
 
   // Wait for the transform to be become available
   ROS_INFO("Waiting for transform from \"map\" to \"base_link\"");
@@ -160,12 +175,14 @@ BrickSearch::BrickSearch(ros::NodeHandle& nh) : it_{ nh }
   global_localization_service_client.call(srv);
 
   image_pub_ = it_.advertise("/blob_detection", 1);
-  //image_pub_ = it_.advertise("/map_image", 1);
+  image_map_pub_ = it_.advertise("/map_image", 1);
 
   img_props_set_ = 0;
   img_width_ = 0;
   img_height_ = 0;
 
+  AssessMap();
+  
 }
 
 geometry_msgs::Pose2D BrickSearch::getPose2d()
@@ -210,8 +227,9 @@ void BrickSearch::amclPoseCallback(const geometry_msgs::PoseWithCovarianceStampe
 
 void BrickSearch::imageCallback(const sensor_msgs::ImageConstPtr& image_msg_ptr)
 {
+  bool brick_flag = false;
   // The camera publishes at 30 fps, it's probably a good idea to analyse images at a lower rate than that
-  if (image_msg_count_ < 15)
+  if (image_msg_count_ < 5)
   {
     image_msg_count_++;
     return;
@@ -219,7 +237,6 @@ void BrickSearch::imageCallback(const sensor_msgs::ImageConstPtr& image_msg_ptr)
   else
   {
     // Use this method to identify when the brick is visible
-    brick_found_ = false;
     image_msg_count_ = 0;
   }
 
@@ -276,7 +293,7 @@ void BrickSearch::imageCallback(const sensor_msgs::ImageConstPtr& image_msg_ptr)
     cv::minEnclosingCircle(contours[i], c, r);
 
     // Only save larger blobs (red brick). If a larger blob is seen, it is the brick and set the brick found variable to 1
-    if(r > 75) {
+    if(r > 120) {
         std::cout << "Circle at: " << c.x << ", " << c.y << " with radius: " << r << std::endl;
         std::cout << std::endl;
 
@@ -291,9 +308,11 @@ void BrickSearch::imageCallback(const sensor_msgs::ImageConstPtr& image_msg_ptr)
 
             brick_properties_lock.unlock();
 	}
-        brick_found_ = true;
+        brick_flag = true;
     }
   }
+
+  brick_found_ = brick_flag;
 
   // Print red Circle onto the image for visualisation purposes
   count = centre.size();
@@ -316,9 +335,82 @@ void BrickSearch::imageCallback(const sensor_msgs::ImageConstPtr& image_msg_ptr)
   ROS_INFO_STREAM("brick_found_: " << brick_found_);
 }
 
+void BrickSearch::AssessMap() {
+  std::cout << "Assessing the map!" << std::endl;
+  int MapWidth = map_image_.cols;
+  int MapHeight = map_image_.rows;
+  const int RegionSize = 10;
+  const int PIXEL_BLACK = 0;
+  bool validGoal;
+  
+  double HorizontalRegions = MapWidth / RegionSize;  //Divide the map into smaller squares
+  double VerticalRegions = MapHeight / RegionSize;   //Divide the map into smaller squares
+    
+  for (int i = 0; i < HorizontalRegions; i++) {
+    for (int j = 0; j < VerticalRegions; j++) {
+      int px = (i*RegionSize + (RegionSize/2)); //Calculate the centre  pixel of each square.
+      int py = (j*RegionSize + (RegionSize/2)); //Calculate the centre  pixel of each square.
+      unsigned char &pixel = map_image_.at<unsigned char>(px,py); //Get the colour of the pixel.
+      
+      if (pixel == PIXEL_BLACK) { //If black we want to investigate this point
+        //Add it to the stack of goal poses
+        validGoal = true;
+
+        // Check that within 5 pixels left, right, up and down, it is all free space to provide enough room for the robot to drive to and turn around the goal pose
+        for(int k = -4; k < 5; k ++){
+          for(int l = -4; l < 5; l ++){
+            if((map_image_.at<unsigned char>(px+k, py+l) > PIXEL_BLACK)) {
+               validGoal = false;
+               k = 5;
+               l = 5;
+            }
+          }
+        }
+
+        if(validGoal){
+          geometry_msgs::Pose RobotPose;
+          RobotPose.position.y = (px - map_centre_.x)*map_.info.resolution; //Convert the Pixel to Robot Pose.
+          RobotPose.position.x = ((py - map_centre_.y))*map_.info.resolution; //Convert the Pixel to Robot Pose.
+        
+          ROS_INFO_STREAM("GRID X: " << RobotPose.position.x << ", GRID Y: " << RobotPose.position.y << " Added to ValidGoalList");
+          ValidGoalList.push_back(RobotPose); //Store the Robot Pose for later.
+        }     
+
+      }  
+    }
+  }
+  
+  ROS_INFO_STREAM("List has " << ValidGoalList.size() << " Items");
+  
+}
+
+
+void BrickSearch::orderGoalPoses(geometry_msgs::Pose2D &robot_pose){
+  double distance_1;
+  double distance_2;
+  
+  geometry_msgs::Pose temp_pose;
+  
+  // Sort in descending order based on distance from the robot
+  for ( int i = 0; i < (int)ValidGoalList.size(); ++ i ) {
+    for ( int j = 0; j < (int)ValidGoalList.size()-1; ++ j ) {
+      distance_1 = std::pow(std::pow((ValidGoalList.at(j).position.x - robot_pose.x),2)+std::pow((ValidGoalList.at(j).position.y - robot_pose.y),2),0.5);
+      distance_2 = std::pow(std::pow((ValidGoalList.at(j+1).position.x - robot_pose.x),2)+std::pow((ValidGoalList.at(j+1).position.y - robot_pose.y),2),0.5);
+
+      if ( distance_1 < distance_2 ) {
+        temp_pose = ValidGoalList[j];
+        ValidGoalList[j] = ValidGoalList[j+1];
+        ValidGoalList[j+1] = temp_pose;
+      }
+    }
+  }
+}
+
+
+
 void BrickSearch::mainLoop()
 {
-  // Wait for the TurtleBot to localise
+  // Wait for the TurtleBot to localise  
   ROS_INFO("Localising...");
   while (ros::ok())
   {
@@ -333,23 +425,24 @@ void BrickSearch::mainLoop()
       break;
     }
 
-
-    // Create CV Image for displaying output of blob detection
-    /*
-    cv_bridge::CvImage threshold_image;
-    threshold_image.encoding = "mono8";
-    threshold_image.header = std_msgs::Header();
-    threshold_image.image = map_image_;
-    image_pub_.publish(threshold_image.toImageMsg());
-
-    std::cout << "Map Width: " << map_.info.width;
-    std::cout << "Map Height: " << map_.info.height;
-    std::cout << "Map Resolution: " << map_.info.resolution;
-    std::cout << "Map Origin: " << map_.info.origin.position.x << ", " << map_.info.origin.position.y;
-*/
     ros::Duration(0.1).sleep();
   }
 
+  // Create CV Image for displaying output of map 
+  cv_bridge::CvImage map_image;
+  map_image.encoding = "mono8";
+  map_image.header = std_msgs::Header();
+  map_image.image = map_image_;
+
+ // map_image.image.at<cv::Vec3b>(map_centre_.y, map_centre_.x) = 0;
+
+  // Publish image to topic
+  image_map_pub_.publish(map_image.toImageMsg());
+
+  geometry_msgs::Pose2D robot_pose = getPose2d();
+
+  orderGoalPoses(robot_pose);
+  
   // Stop turning
   geometry_msgs::Twist twist{};
   twist.angular.z = 0.;
@@ -361,43 +454,57 @@ void BrickSearch::mainLoop()
 
   ROS_INFO_STREAM("map_ resolution: " << map_.info.resolution);
 
-
   // Here's an example of getting the current pose and sending a goal to "move_base":
   geometry_msgs::Pose2D pose_2d = getPose2d();
-
   ROS_INFO_STREAM("Current pose: " << pose_2d);
-/*
-  // Move forward 0.5 m
-  pose_2d.x += 0.5 * std::cos(pose_2d.theta);
-  pose_2d.y += 0.5 * std::sin(pose_2d.theta);
 
-  ROS_INFO_STREAM("Target pose: " << pose_2d);
-
-  // Send a goal to "move_base" with "move_base_action_client_"
-  move_base_msgs::MoveBaseActionGoal action_goal{};
-
-  action_goal.goal.target_pose.header.frame_id = "map";
-  action_goal.goal.target_pose.pose = pose2dToPose(pose_2d);
-
-  ROS_INFO("Sending goal...");
-  move_base_action_client_.sendGoal(action_goal.goal);
-*/
 
   // This loop repeats until ROS shuts down, you probably want to put all your code in here
+  int goal_pose_counter = 0;
+  int same_goal_counter = 0;
+  int goal_offset = 0;
+  int xfound = 0;
+
+  geometry_msgs::Pose2D prev_goal_position;
+  prev_goal_position.x = 0.0;
+  prev_goal_position.y = 0.0;
+  
   while (ros::ok())
   {
     ROS_INFO("mainLoop");
     if(!brick_found_){
+      if(xfound == 0){
+        geometry_msgs::Pose2D move_goal_position;
 
-	std::cout << "Brick not found" << std::endl;
-	// Autonomously drive around the maze
-        // Check current position of robot
-        // Calculate next position to drive to
-        // Set action goal
- 	// Send goal to move_base
+        // Set target position and store in move_goal_position
+        //move_goal_position.x = ValidGoalList.at(ValidGoalList.size() - 1 - goal_offset).position.x;
+        //move_goal_position.y = ValidGoalList.at(ValidGoalList.size() - 1 - goal_offset).position.y;
+        //move_goal_position.x = ValidGoalList.at((int)(ValidGoalList.size()/4)*(3 - goal_offset)).position.x;
+        //move_goal_position.y = ValidGoalList.at((int)(ValidGoalList.size()/4)*(3 - goal_offset)).position.y;
+        move_goal_position.x = ValidGoalList.at(goal_offset).position.x;
+        move_goal_position.y = ValidGoalList.at(goal_offset).position.y;
 
+        std::cout << "Same Goal Counter: " << same_goal_counter << std::endl;
+
+        std::cout << "Set Goal Position to be: (" << move_goal_position.x << ", " << move_goal_position.y << ")" << std::endl;
+                
+        move_base_msgs::MoveBaseActionGoal action_goal{};
+
+        action_goal.goal.target_pose.header.frame_id = "map";
+        action_goal.goal.target_pose.pose = pose2dToPose(move_goal_position);
+
+        ROS_INFO_STREAM("Send goal... X:" << move_goal_position.x << ", Y:" << move_goal_position.y );
+
+        prev_goal_position = move_goal_position;
+
+        move_base_action_client_.sendGoal(action_goal.goal);
+        
+        xfound = 1;
+
+      }
 
     } else {
+        move_base_action_client_.cancelAllGoals();
         std::cout << "Brick Found! Navigating to brick" << std::endl;
         double brick_radius;
         double diff_x;
@@ -413,14 +520,17 @@ void BrickSearch::mainLoop()
 	geometry_msgs::Twist twist{};
 	
 	std::cout << "Brick Radius: " << brick_radius << std::endl;
-
+        
+        // If not close enough to the brick, adjust to drive towards it
 	if(brick_radius < stopping_dist_from_brick){
 	    
+            // Centre brick in the FOV of the camera
 	    if(std::abs(diff_x) > brick_angular_thresh){
 		std::cout << "Twisting to face brick" << std::endl;
 		twist.linear.x = 0.;
   	        twist.angular.z = -1*(diff_x/img_width_for_calc)*0.3;
 
+            // Once centred, drive towards the brick
 	    } else {
 		std::cout << "Driving at brick!" << std::endl;
 		twist.angular.z = 0.;
@@ -429,6 +539,7 @@ void BrickSearch::mainLoop()
 	    }
 
         } else {
+            // Once reaching the brick, stop moving and set flag to true
   	    twist.angular.z = 0.;
 	    twist.linear.x = 0.;
 
@@ -445,20 +556,51 @@ void BrickSearch::mainLoop()
 
     // Get the state of the goal
     actionlib::SimpleClientGoalState state = move_base_action_client_.getState();
+    ROS_INFO_STREAM(state.getText());
 
-    if (state == actionlib::SimpleClientGoalState::SUCCEEDED)
+    if(state==actionlib::SimpleClientGoalState::ABORTED){
+       std::cout << "Goal Aborted!!" << std::endl;
+       goal_offset++;
+       xfound = 0;
+    }
+
+    if ((state == actionlib::SimpleClientGoalState::SUCCEEDED) || (navigated_to_brick_ == true))
     {
-
-      // Print the state of the goal
-      ROS_INFO_STREAM(state.getText());
-
       // Check if flag is set of reaching the brick, if so, shutdown ROS
-      // Shutdown when done
-      //ros::shutdown();
+      if(navigated_to_brick_ == true){
+        std::cout << "Found the Brick and reached the Target Location. Shutting Down ROS" << std::endl;
+        ros::shutdown();
+      } else {
+        // Print the state of the goal
+        ROS_INFO_STREAM(state.getText());
+
+        goal_offset = 0;
+        xfound = 0;
+
+        for(int i = goal_offset; i < (ValidGoalList.size() - 1); i++){
+	  ValidGoalList.at(i) = ValidGoalList.at(i+1);
+
+        }
+
+        ValidGoalList.pop_back();
+
+        geometry_msgs::Pose2D robot_pose = getPose2d();
+        orderGoalPoses(robot_pose);
+        
+
+        // If all waypoints have been hit, reset waypoints and start again
+        if ((ValidGoalList.size() == 0)) {
+          AssessMap();
+          geometry_msgs::Pose2D robot_pose = getPose2d();
+          orderGoalPoses(robot_pose);
+        }
+      }
+      
+
     }
 
     // Delay so the loop doesn't run too fast
-    ros::Duration(0.2).sleep();
+    ros::Duration(0.5).sleep();
   }
 }
 
